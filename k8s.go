@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/alecthomas/chroma/quick"
+	"github.com/manifoldco/promptui"
 	istio "istio.io/client-go/pkg/clientset/versioned"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -17,9 +19,9 @@ import (
 )
 
 type Klient struct {
-	kubeClient  *kubernetes.Clientset
-	istioClient *istio.Clientset
-	cfg         *rest.Config
+	kube  *kubernetes.Clientset
+	istio *istio.Clientset
+	cfg   *rest.Config
 }
 
 func newClient() *Klient {
@@ -61,12 +63,12 @@ func (k *Klient) validateCluster() error {
 
 // ListNamespacesWithEmail lists namespaces that have the specified email address in an annotation
 func (k *Klient) ListNamespacesWithEmail(email string) error {
-	namespaces, err := k.kubeClient.CoreV1().Namespaces().List(context.TODO(), metav1.ListOptions{})
+	namespaces, err := k.kube.CoreV1().Namespaces().List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to list namespaces: %v", err)
 	}
 
-	fmt.Printf("Namespaces with owner email '%s':\n", email)
+	fmt.Printf("Codespaces with owner email '%s':\n", email)
 	for _, ns := range namespaces.Items {
 		annotations := ns.Annotations
 		if annotations != nil && annotations["owner"] == email {
@@ -104,12 +106,12 @@ func (k *Klient) CreateNamespace(namespaceName, email string) error {
 		},
 	}
 
-	_, err := k.kubeClient.CoreV1().Namespaces().Create(context.TODO(), ns, metav1.CreateOptions{})
+	_, err := k.kube.CoreV1().Namespaces().Create(context.TODO(), ns, metav1.CreateOptions{})
 	return err
 }
 
 func (k *Klient) getNamespaceByName(namespaceName string) (*v1.Namespace, error) {
-	namespace, err := k.kubeClient.CoreV1().Namespaces().Get(context.TODO(), namespaceName, metav1.GetOptions{})
+	namespace, err := k.kube.CoreV1().Namespaces().Get(context.TODO(), namespaceName, metav1.GetOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to get namespace %s: %v", namespaceName, err)
 	}
@@ -125,29 +127,29 @@ func (k *Klient) getResourceNames(namespace string) ([]string, error) {
 	var names []string
 
 	// Get all services
-	services, err := k.kubeClient.CoreV1().Services(namespace).List(context.TODO(), metav1.ListOptions{})
+	services, err := k.kube.CoreV1().Services(namespace).List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list services: %v", err)
 	}
 	for _, svc := range services.Items {
-		names = append(names, fmt.Sprintf("Service: %s", svc.Name))
+		names = append(names, fmt.Sprintf("Service %s", svc.Name))
 	}
 
 	// Get all deployments
-	deployments, err := k.kubeClient.AppsV1().Deployments(namespace).List(context.TODO(), metav1.ListOptions{})
+	deployments, err := k.kube.AppsV1().Deployments(namespace).List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list deployments: %v", err)
 	}
 	for _, deploy := range deployments.Items {
-		names = append(names, fmt.Sprintf("Deployment: %s", deploy.Name))
+		names = append(names, fmt.Sprintf("Deployment %s", deploy.Name))
 	}
 
-	virtualServices, err := k.istioClient.NetworkingV1alpha3().VirtualServices(namespace).List(context.TODO(), metav1.ListOptions{})
+	virtualServices, err := k.istio.NetworkingV1alpha3().VirtualServices(namespace).List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list virtual services: %v", err)
 	}
 	for _, vs := range virtualServices.Items {
-		names = append(names, fmt.Sprintf("VirtualService: %s", vs.Name))
+		names = append(names, fmt.Sprintf("VirtualService %s", vs.Name))
 	}
 
 	return names, nil
@@ -159,14 +161,30 @@ func (k *Klient) selectResource(namespace string) (string, error) {
 		return "", fmt.Errorf("failed to get resources: %v", err)
 	}
 
-	input := strings.Join(resources, "\n")
-
-	cmd := exec.Command("fzf")
-	cmd.Stdin = strings.NewReader(input)
-
-	output, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("fzf failed: %v", err)
+	p := promptui.Select{
+		Label: "Choose a resource",
+		Items: resources,
 	}
-	return strings.TrimSpace(string(output)), nil
+	_, resource, err := p.Run()
+	if err != nil {
+		return "", err
+	}
+
+	parts := strings.SplitN(resource, " ", 2)
+	if len(parts) != 2 {
+		return "", fmt.Errorf("invalid format; expected 'ResourceType name'")
+	}
+	resourceType := strings.TrimSpace(parts[0])
+	resourceName := strings.TrimSpace(parts[1])
+
+	b, err := exec.Command("kubectl", "get", resourceType, resourceName, "-o", "yaml").CombinedOutput()
+	if err != nil {
+		return "", err
+	}
+
+	fmt.Println("---")
+	if err := quick.Highlight(os.Stdout, string(b), "yaml", "terminal", "monokai"); err != nil {
+		return "", fmt.Errorf("failed to highlight YAML output: %v", err)
+	}
+	return resource, nil
 }

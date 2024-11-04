@@ -61,9 +61,11 @@ func main() {
 							if err != nil {
 								return cli.Exit(err.Error(), 1)
 							}
-							if err := klient.CreateNamespace(c.Args().Get(0), email); err != nil {
+							name := c.Args().Get(0)
+							if err := klient.CreateNamespace(name, email); err != nil {
 								return cli.Exit(err.Error(), 1)
 							}
+							fmt.Println("Created codespace:", name)
 							return nil
 						},
 					},
@@ -71,8 +73,12 @@ func main() {
 						Name:  "desc",
 						Usage: "Describe a codespace",
 						Action: func(c *cli.Context) error {
-							klient.selectResource(c.Args().First())
-							return nil
+							name := c.Args().First()
+							if name == "" {
+								return fmt.Errorf("arg 1: 'name' is required")
+							}
+							_, err := klient.selectResource(name)
+							return err
 						},
 					},
 				},
